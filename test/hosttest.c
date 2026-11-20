@@ -43,7 +43,7 @@ typedef struct {
     uint16_t w, h, next;
 } ppm_t;
 
-static void ppm_row(void *ctx, const uint8_t *rgb, uint16_t y)
+static void ppm_row(void *ctx, const uint8_t IMG_FAR *rgb, uint16_t y)
 {
     ppm_t *p = (ppm_t *)ctx;
     (void)y;

@@ -1,6 +1,7 @@
 #!/bin/sh
 # DOS regression: run DPHOTO.EXE in an emulator and compare its PPM dumps
-# against ffmpeg, plus the /selftest and a /render capture.
+# against ffmpeg, plus the /selftest, a /render capture and a /save round
+# trip through the native image format.
 #
 #   ./test/run_dos_tests.sh <path to DPHOTO.EXE> <host mounted dir> [workdir]
 #
@@ -31,6 +32,8 @@ ff -i "$work/f.ppm" -pix_fmt gray16be "$work/t16.png"
 ff -i "$work/f.ppm" -pix_fmt yuv420p "$work/t420.jpg"
 ff -i "$work/f.ppm" -pix_fmt yuv444p "$work/t444.jpg"
 ff -i "$work/f.ppm" -pix_fmt gray "$work/tgray.jpg"
+ff -f lavfi -i "testsrc2=size=1600x400:duration=1" -frames:v 1 \
+    -pix_fmt rgb24 "$work/wide1600.png"
 ff -i "$work/f.ppm" -pix_fmt bgr24 "$work/t24.bmp"
 ff -i "$work/f.ppm" -pix_fmt bgra "$work/t32.bmp"
 ff -i "$work/f.ppm" -pix_fmt pal8 "$work/t8.bmp"
@@ -68,11 +71,15 @@ conf="$work/run.conf"
         echo "DPHOTO /dump O$n.PPM $key.$ext > L$n.TXT"
     done < "$list"
     first=$(head -1 "$list")
-    echo "DPHOTO /render R.DPH ${first%% *}.$(echo "${first#* }" | sed 's/.*\.//' | tr 'a-z' 'A-Z') > R.TXT"
+    fkey=${first%% *}
+    fext=$(echo "${first#* }" | sed 's/.*\.//' | tr 'a-z' 'A-Z')
+    echo "DPHOTO /render R.DPH $fkey.$fext > R.TXT"
+    echo "DPHOTO /save S1.IMG $fkey.$fext > S1.TXT"
+    echo "DPHOTO /dump S1.PPM S1.IMG > S2.TXT"
     echo "exit"
 } > "$conf"
 
-rm -f "$mnt"/O*.PPM "$mnt"/*.TXT "$mnt"/R.DPH
+rm -f "$mnt"/O*.PPM "$mnt"/*.TXT "$mnt"/R.DPH "$mnt"/S1.IMG
 ( cd "$work" && $DOSBOX -conf "$conf" -exit > emu.log 2>&1 ) || true
 
 echo "--- selftest"
@@ -93,6 +100,21 @@ while read -r key path; do
     printf '%-3s %-24s %s\n' "$key" "$(basename "$path")" "$res"
     case $res in PASS) pass=$((pass + 1)) ;; *) fail=$((fail + 1)) ;; esac
 done < "$list"
+
+echo "--- native image round trip"
+if [ -f "$mnt/S1.IMG" ] && [ -f "$mnt/S1.PPM" ]; then
+    if res=$(python3 "$top/test/check_img.py" "$mnt/S1.IMG" "$mnt/S1.PPM" \
+             --dph "$mnt/R.DPH" 2>&1); then
+        echo "S1  s1.img                   PASS ($res)"
+        pass=$((pass + 1))
+    else
+        echo "S1  s1.img                   FAIL: $res"
+        fail=$((fail + 1))
+    fi
+else
+    echo "S1  s1.img                   MISSING"
+    fail=$((fail + 1))
+fi
 
 echo "--------------------------------------"
 echo "$pass passed, $fail failed"

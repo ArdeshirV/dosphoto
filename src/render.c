@@ -85,7 +85,7 @@ void render_begin(render_t *r, uint16_t sw, uint16_t sh,
         g_xmap[x] = (uint16_t)((uint32_t)x * sw / r->dw);
 }
 
-static void render_compose(render_t *r, const uint8_t *rgb, uint16_t j)
+static void render_compose(render_t *r, const uint8_t IMG_FAR *rgb, uint16_t j)
 {
     uint8_t phase = (uint8_t)((j & 3) << 2);
     uint16_t x, dw = r->dw;
@@ -93,7 +93,7 @@ static void render_compose(render_t *r, const uint8_t *rgb, uint16_t j)
 
     for (x = 0; x < dw; x++) {
         const uint8_t *qt = g_qt[phase + (x & 3)];
-        const uint8_t *p = rgb + 3 * (uint16_t)g_xmap[x];
+        const uint8_t IMG_FAR *p = rgb + 3 * (uint16_t)g_xmap[x];
         uint8_t lr = qt[p[0]];
         uint8_t lg = qt[p[1]];
         uint8_t lb = qt[p[2]];
@@ -102,7 +102,7 @@ static void render_compose(render_t *r, const uint8_t *rgb, uint16_t j)
     r->blit(r->blit_ctx, (uint16_t)(r->dy + j), r->dx, out, dw);
 }
 
-void render_row(void *ctx, const uint8_t *rgb, uint16_t y)
+void render_row(void *ctx, const uint8_t IMG_FAR *rgb, uint16_t y)
 {
     render_t *r = (render_t *)ctx;
 

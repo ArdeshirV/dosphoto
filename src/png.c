@@ -27,7 +27,7 @@ typedef struct {
     uint16_t trns_n;
     uint8_t  has_trns;
 
-    uint8_t *prev, *cur;
+    uint8_t IMG_FAR *prev, *cur;
     uint16_t fill;
     uint16_t y;
 
@@ -40,8 +40,10 @@ typedef struct {
     uint8_t  err;
 } png_t;
 
-/* Two filtered scanlines: filter byte + data. */
-static uint8_t g_pngrows[2 * (IMG_MAX_ROW + 1)];
+/* Two filtered scanlines (filter byte + data) in far memory, sized to the
+ * image so wide photos fit.  They are separate blocks: a 4096-pixel RGBA16
+ * row is 32K, and two of them would not fit in one 64K segment. */
+static buf_t g_pngprev, g_pngcur;
 
 static int png_channels(uint8_t ctype)
 {
@@ -225,8 +227,8 @@ static uint8_t paeth(int a, int b, int c)
 
 static int png_unfilter(png_t *p)
 {
-    uint8_t *cur = p->cur;
-    uint8_t *prev = p->prev;
+    uint8_t IMG_FAR *cur = p->cur;
+    uint8_t IMG_FAR *prev = p->prev;
     int ft = cur[0];
     uint16_t n = p->rowbytes;
     uint16_t i;
@@ -252,7 +254,7 @@ static int png_unfilter(png_t *p)
     return IMG_OK;
 }
 
-static int png_get_sample(const uint8_t *row, uint16_t idx, uint8_t depth)
+static int png_get_sample(const uint8_t IMG_FAR *row, uint16_t idx, uint8_t depth)
 {
     switch (depth) {
     case 1: return (row[idx >> 3] >> (7 - (idx & 7))) & 1;
@@ -262,7 +264,7 @@ static int png_get_sample(const uint8_t *row, uint16_t idx, uint8_t depth)
     return row[idx];
 }
 
-static uint8_t s16(const uint8_t *p)
+static uint8_t s16(const uint8_t IMG_FAR *p)
 {
     int v = p[0] + (p[1] >> 7);
     return v > 255 ? 255 : (uint8_t)v;
@@ -279,8 +281,8 @@ static uint8_t png_comp(uint8_t c, uint8_t a)
 
 static void png_emit(png_t *p)
 {
-    const uint8_t *row = p->cur + 1;
-    uint8_t *out = g_rgbrow;
+    const uint8_t IMG_FAR *row = p->cur + 1;
+    uint8_t IMG_FAR *out = g_rgbrow;
     uint16_t w = p->width, x, i;
 
     switch (p->ctype) {
@@ -324,7 +326,7 @@ static void png_emit(png_t *p)
         for (x = 0; x < w; x++) {
             int idx = png_get_sample(row, x, p->depth);
             uint8_t a = 255;
-            if (p->has_trns && idx < p->trns_n)
+            if (p->has_trns && idx < (int)p->trns_n)
                 a = p->trns[idx];
             out[3 * x]     = png_comp(p->pal[3 * idx], a);
             out[3 * x + 1] = png_comp(p->pal[3 * idx + 1], a);
@@ -381,12 +383,12 @@ static void png_sink(void *ctx, const uint8_t *buf, uint16_t n)
         uint16_t room = (uint16_t)(p->rowbytes + 1 - p->fill);
         uint16_t k = (n < room) ? n : room;
 
-        memcpy(p->cur + p->fill, buf, k);
+        fmemcpy(p->cur + p->fill, buf, k);
         p->fill = (uint16_t)(p->fill + k);
         buf += k;
         n = (uint16_t)(n - k);
         if (p->fill == p->rowbytes + 1) {
-            uint8_t *t;
+            uint8_t IMG_FAR *t;
             p->fill = 0;
             if (png_unfilter(p) != IMG_OK) {
                 p->err = 1;
@@ -417,8 +419,8 @@ static void png_reset(png_t *p, buf_t *f, img_row_fn cb, void *ctx)
     p->trns_n = 0;
     p->cb = cb;
     p->ctx = ctx;
-    p->prev = g_pngrows;
-    p->cur = g_pngrows + (IMG_MAX_ROW + 1);
+    p->prev = 0;
+    p->cur = 0;
 }
 
 int png_info(const buf_t *f, img_info_t *info)
@@ -439,8 +441,26 @@ int png_decode(const buf_t *f, img_row_fn cb, void *ctx)
     if (err != IMG_OK)
         return err;
 
+    /* Two filtered scanlines: filter byte + data, in far memory. */
+    {
+        uint32_t need = (uint32_t)p.rowbytes + 1u;
+
+        if (g_pngprev.len < need) {
+            mem_free(&g_pngprev);
+            if (mem_alloc(need, &g_pngprev) != IMG_OK)
+                return IMG_ERR_NOMEM;
+        }
+        if (g_pngcur.len < need) {
+            mem_free(&g_pngcur);
+            if (mem_alloc(need, &g_pngcur) != IMG_OK)
+                return IMG_ERR_NOMEM;
+        }
+        p.prev = buf_fp(&g_pngprev);
+        p.cur = buf_fp(&g_pngcur);
+    }
+
     /* Filter type 0 ("None") treats the previous row as zero. */
-    memset(p.prev, 0, (size_t)p.rowbytes + 1);
+    fmemset(p.prev, 0, (uint32_t)p.rowbytes + 1);
 
     /* Strip the 2-byte zlib header that precedes the raw DEFLATE data. */
     {
@@ -455,6 +475,7 @@ int png_decode(const buf_t *f, img_row_fn cb, void *ctx)
     win_free();
     if (p.err)
         return IMG_ERR_CORRUPT;
+
     if (p.complete)
         return IMG_OK;
     if (err != IMG_OK)

@@ -15,7 +15,7 @@ CFLAGS  ?= -O2 -g -std=c99 -Wall -Wextra
 LDLIBS  ?= -lm
 
 SRC     := src/img.c src/stream.c src/inflate.c src/png.c src/bmp.c \
-           src/jpeg.c src/render.c
+           src/jpeg.c src/dimg.c src/render.c
 
 DOS_SRC := $(SRC) src/dos/mem.c src/dos/ui.c src/dos/main.c
 
@@ -24,7 +24,8 @@ DOS_OBJ := $(patsubst %.c,$(OBJDIR)/%.o,$(DOS_SRC))
 
 HOST_OBJ := build/host/img.o build/host/stream.o build/host/inflate.o \
             build/host/png.o build/host/bmp.o build/host/jpeg.o \
-            build/host/render.o build/host/host_mem.o build/host/hosttest.o
+            build/host/dimg.o build/host/render.o build/host/host_mem.o \
+            build/host/hosttest.o
 
 .PHONY: all dos host test clean
 

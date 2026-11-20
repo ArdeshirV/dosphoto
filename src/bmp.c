@@ -17,13 +17,13 @@ typedef struct {
     uint8_t  bits[3];
 } bmp_t;
 
-static uint32_t le32(const uint8_t *p)
+static uint32_t le32(const uint8_t IMG_FAR *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-static uint16_t le16(const uint8_t *p)
+static uint16_t le16(const uint8_t IMG_FAR *p)
 {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
@@ -159,7 +159,7 @@ static int bmp_parse(bmp_t *b, const buf_t *f, img_info_t *info)
 }
 
 /* Palette/index extractor for sub-byte depths. */
-static int bmp_index(const uint8_t *row, int x, int bpp)
+static int bmp_index(const uint8_t IMG_FAR *row, int x, int bpp)
 {
     switch (bpp) {
     case 1: return (row[x >> 3] >> (7 - (x & 7))) & 1;
@@ -177,26 +177,35 @@ int bmp_info(const buf_t *f, img_info_t *info)
 int bmp_decode(const buf_t *f, img_row_fn cb, void *ctx)
 {
     static bmp_t b;
-    static uint8_t row[IMG_MAX_ROW];
+    static buf_t rowbuf;
+    uint8_t IMG_FAR *row;
     img_info_t info;
     int err;
-    int y, x;
+    int y;
+    uint16_t x;
     uint16_t w;
 
     err = bmp_parse(&b, f, &info);
     if (err != IMG_OK)
         return err;
 
+    if (b.stride > rowbuf.len) {
+        mem_free(&rowbuf);
+        if (mem_alloc(b.stride, &rowbuf) != IMG_OK)
+            return IMG_ERR_NOMEM;
+    }
+    row = buf_fp(&rowbuf);
+
     w = info.width;
     for (y = 0; y < (int)b.height; y++) {
         uint32_t src_y = b.topdown ? (uint32_t)y : (uint32_t)(b.height - 1 - y);
-        const uint8_t *rp = row;
-        uint8_t *out = g_rgbrow;
+        const uint8_t IMG_FAR *rp = row;
+        uint8_t IMG_FAR *out = g_rgbrow;
         uint32_t roff = b.data_off + src_y * b.stride;
 
         if (roff + b.stride > f->len)
             return IMG_ERR_TRUNC;
-        fget_n(f, roff, row, b.stride);
+        fget_far(f, roff, row, b.stride);
 
         switch (b.bpp) {
         case 1:
@@ -204,7 +213,7 @@ int bmp_decode(const buf_t *f, img_row_fn cb, void *ctx)
         case 8:
             for (x = 0; x < w; x++) {
                 int idx = bmp_index(rp, x, b.bpp);
-                if (idx >= b.ncolors) idx = 0;
+                if (idx >= (int)b.ncolors) idx = 0;
                 out[3 * x]     = b.pal[idx][0];
                 out[3 * x + 1] = b.pal[idx][1];
                 out[3 * x + 2] = b.pal[idx][2];

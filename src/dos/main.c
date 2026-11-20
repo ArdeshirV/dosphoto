@@ -2,6 +2,8 @@
  *
  *   DPHOTO [/320|/640] [file]     browse and view
  *   DPHOTO /dump out.ppm file     decode a file to a PPM
+ *   DPHOTO /save out.img file     render a file into a native image
+ *   DPHOTO /render out.dph file   render a file and capture the screen
  *   DPHOTO /selftest              run built-in checks
  */
 #include <dos.h>
@@ -114,13 +116,17 @@ static int ensure_cap(buf_t *b, uint32_t need)
         return IMG_OK;
     while (ncap < need) {
         ncap *= 2;
-        if (ncap > 0x70000UL)
-            ncap = 0x70000UL;
-        if (ncap == 0x70000UL && need > ncap)
+        if (ncap > 0xF0000UL)
+            ncap = 0xF0000UL;
+        if (ncap == 0xF0000UL && need > ncap)
             return IMG_ERR_NOMEM;
     }
-    if (mem_alloc(ncap, &nb) != IMG_OK)
-        return IMG_ERR_NOMEM;
+    if (mem_alloc(ncap, &nb) != IMG_OK) {
+        /* Conventional memory is tight: settle for exactly what is needed
+         * instead of the rounded-up size. */
+        if (ncap == need || mem_alloc(need, &nb) != IMG_OK)
+            return IMG_ERR_NOMEM;
+    }
     for (i = 0; i < b->len; i += 2048) {
         uint32_t k = b->len - i;
 
@@ -169,11 +175,11 @@ static int load_file(const char *name, buf_t *b)
 static void build_list(void)
 {
     struct find_t f;
-    static const char *const exts[3] = {"*.BMP", "*.PNG", "*.JPG"};
+    static const char *const exts[4] = {"*.BMP", "*.PNG", "*.JPG", "*.IMG"};
     int e;
 
     g_nfiles = 0;
-    for (e = 0; e < 3; e++) {
+    for (e = 0; e < 4; e++) {
         unsigned rc = _dos_findfirst(exts[e], _A_ARCH | _A_RDONLY, &f);
 
         while (rc == 0 && g_nfiles < MAXFILES) {
@@ -216,7 +222,7 @@ static void vblit(void *ctx, uint16_t y, uint16_t x, const uint8_t *p, uint16_t 
     vid_blit(0, (uint16_t)(y + 8), x, p, n);
 }
 
-static void row_cb(void *ctx, const uint8_t *rgb, uint16_t y)
+static void row_cb(void *ctx, const uint8_t IMG_FAR *rgb, uint16_t y)
 {
     (void)y;
     render_row(ctx, rgb, y);
@@ -314,7 +320,7 @@ static int fwrite_near(int h, const void *p, unsigned n)
     return got == n ? 0 : -1;
 }
 
-static void dump_ctx(void *ctx, const uint8_t *rgb, uint16_t y);
+static void dump_ctx(void *ctx, const uint8_t IMG_FAR *rgb, uint16_t y);
 
 typedef struct {
     int h;
@@ -323,13 +329,22 @@ typedef struct {
 
 static dump_t g_dump;
 
-static void dump_ctx(void *ctx, const uint8_t *rgb, uint16_t y)
+static void dump_ctx(void *ctx, const uint8_t IMG_FAR *rgb, uint16_t y)
 {
     dump_t *d = (dump_t *)ctx;
+    uint32_t n = (uint32_t)g_srcw * 3, off = 0;
 
     (void)y;
-    if (!d->err && fwrite_near(d->h, rgb, (unsigned)(g_srcw * 3)) != 0)
-        d->err = 1;
+    while (!d->err && off < n) {
+        uint32_t k = n - off;
+
+        if (k > sizeof g_io)
+            k = sizeof g_io;
+        fmem_get(g_io, rgb + off, k);
+        if (fwrite_near(d->h, g_io, (unsigned)k) != 0)
+            d->err = 1;
+        off += k;
+    }
 }
 
 static int do_dump(const char *out, const char *in)
@@ -376,13 +391,123 @@ static int do_dump(const char *out, const char *in)
     mem_free(&f);
     if (rc != IMG_OK) {
         printf("dphoto: decode failed: %s\n", img_errstr(rc));
-        return 1;
     }
     if (g_dump.err) {
         printf("dphoto: write failed\n");
         return 1;
     }
     printf("dphoto: wrote %s (%ux%u)\n", out, info.width, info.height);
+    return 0;
+}
+
+/* ---- native image writer ---- */
+
+typedef struct {
+    buf_t   *pix;
+    uint16_t stride;
+    uint16_t yoff;
+    int      err;
+} cap_t;
+
+static void cap_blit(void *ctx, uint16_t y, uint16_t x, const uint8_t *p,
+                     uint16_t n)
+{
+    cap_t *c = (cap_t *)ctx;
+    uint32_t off = (uint32_t)(y + c->yoff) * c->stride + x;
+
+    if (off + n > c->pix->len) {
+        c->err = 1;
+        return;
+    }
+    fput_n(c->pix, off, p, n);
+}
+
+/* Render an image the way the viewer would and store the result as a
+ * native "DPH1IMG" file: header, palette, one palette index per pixel. */
+static int do_save(const char *out, const char *in)
+{
+    buf_t f, screen;
+    img_info_t info;
+    render_t r;
+    cap_t cap;
+    uint16_t tw, th;
+    uint32_t len, i;
+    uint8_t hdr[DIMG_PAL_OFF];
+    int h, rc, k;
+
+    if (load_file(in, &f) != IMG_OK) {
+        printf("dphoto: cannot read %s\n", in);
+        return 1;
+    }
+    rc = img_read_info(&f, &info);
+    if (rc != IMG_OK) {
+        printf("dphoto: %s: %s\n", in, img_errstr(rc));
+        mem_free(&f);
+        return 1;
+    }
+
+    tw = (g_wantmode == UIMODE_VESA) ? 640 : 320;
+    th = (tw == 640) ? 480 : 200;
+    len = (uint32_t)tw * th;
+    if (mem_alloc(len, &screen) != IMG_OK) {
+        printf("dphoto: out of memory for %ux%u\n", tw, th);
+        mem_free(&f);
+        return 1;
+    }
+    fzero(&screen, 0, len);
+
+    render_init();
+    render_palette(g_pal);
+    /* Same geometry as the viewer: the image area starts below the title
+     * bar, so a saved .img matches what the screen shows. */
+    cap.pix = &screen;
+    cap.stride = tw;
+    cap.yoff = 8;
+    cap.err = 0;
+    render_begin(&r, info.width, info.height, tw, (uint16_t)(th - 8),
+                 cap_blit, &cap);
+    rc = img_decode(&f, &info, row_cb, &r);
+    mem_free(&f);
+    if (rc != IMG_OK || cap.err) {
+        printf("dphoto: %s: %s\n", in, rc != IMG_OK ? img_errstr(rc)
+                                                      : "render overflow");
+        mem_free(&screen);
+        return 1;
+    }
+
+    for (k = 0; k < 8; k++)
+        hdr[k] = (uint8_t)"DPH1IMG\n"[k];
+    hdr[8]  = (uint8_t)(tw & 0xFF);
+    hdr[9]  = (uint8_t)(tw >> 8);
+    hdr[10] = (uint8_t)(th & 0xFF);
+    hdr[11] = (uint8_t)(th >> 8);
+    hdr[12] = 8;                        /* bits per pixel */
+    hdr[13] = 0;                        /* palette is 8-bit */
+    hdr[14] = 1;                        /* version */
+    hdr[15] = 0;
+
+    if (_dos_creat(out, _A_NORMAL, &h) != 0) {
+        printf("dphoto: cannot create %s\n", out);
+        mem_free(&screen);
+        return 1;
+    }
+    k = fwrite_near(h, hdr, sizeof hdr) || fwrite_near(h, g_pal, 768);
+    for (i = 0; !k && i < len; i += (uint32_t)sizeof g_io) {
+        uint32_t n = len - i;
+
+        if (n > sizeof g_io)
+            n = sizeof g_io;
+        fget_n(&screen, i, g_io, n);
+        if (fwrite_near(h, g_io, (unsigned)n) != 0)
+            k = 1;
+    }
+    _dos_close(h);
+    mem_free(&screen);
+    if (k) {
+        printf("dphoto: write failed\n");
+        return 1;
+    }
+    printf("dphoto: wrote %s (%ux%u from %s)\n", out, tw, th, in);
     return 0;
 }
 
@@ -557,13 +682,14 @@ typedef struct {
     int rows;
 } vfy_t;
 
-static void vfy_row(void *ctx, const uint8_t *rgb, uint16_t y)
+static void vfy_row(void *ctx, const uint8_t IMG_FAR *rgb, uint16_t y)
 {
     vfy_t *v = (vfy_t *)ctx;
     uint16_t i;
 
+    fmem_get(g_io, rgb, v->stride);
     for (i = 0; i < v->stride; i++)
-        if (rgb[i] != v->want[(uint32_t)y * v->stride + i])
+        if (g_io[i] != v->want[(uint32_t)y * v->stride + i])
             v->bad++;
     v->rows++;
 }
@@ -757,16 +883,18 @@ static int do_selftest(void)
 
 static void usage(void)
 {
-    printf("dphoto - DOS image viewer (BMP/PNG/JPEG)\n"
+    printf("dphoto - DOS image viewer (BMP/PNG/JPEG/IMG)\n"
            "  DPHOTO [/320|/640] [file]   view images\n"
            "  DPHOTO /dump out.ppm file   decode to PPM\n"
+           "  DPHOTO /save out.img file   save a native IMG\n"
+           "  DPHOTO /render out.dph file capture the screen\n"
            "  DPHOTO /selftest            run self test\n");
 }
 
 int main(int argc, char *argv[])
 {
-    int i, selftest = 0, dump = 0;
-    const char *outp = 0, *inp = 0;
+    int i, selftest = 0;
+    const char *inp = 0;
 
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -783,6 +911,18 @@ int main(int argc, char *argv[])
                     return 2;
                 }
                 return do_render_dph(argv[i + 1], argv[i + 2]);
+            } else if (!strcmp(o, "dump")) {
+                if (i + 2 >= argc) {
+                    usage();
+                    return 2;
+                }
+                return do_dump(argv[i + 1], argv[i + 2]);
+            } else if (!strcmp(o, "save")) {
+                if (i + 2 >= argc) {
+                    usage();
+                    return 2;
+                }
+                return do_save(argv[i + 1], argv[i + 2]);
             } else if (!strcmp(o, "320")) {
                 g_wantmode = UIMODE_13H;
             } else if (!strcmp(o, "640")) {
@@ -798,13 +938,6 @@ int main(int argc, char *argv[])
 
     if (selftest)
         return do_selftest();
-    if (dump) {
-        if (!outp || !inp) {
-            usage();
-            return 2;
-        }
-        return do_dump(outp, inp);
-    }
 
     vid_init(g_wantmode);
     render_init();

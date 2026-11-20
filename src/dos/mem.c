@@ -79,6 +79,94 @@ void fzero(const buf_t *b, uint32_t off, uint32_t n)
     }
 }
 
+uint8_t IMG_FAR *buf_fp(const buf_t *b)
+{
+    return (uint8_t IMG_FAR *)dseg_fp((uint16_t)(b->lin >> 4), 0);
+}
+
+/* Note: a __far pointer is a segment:offset pair, so only its low 16 bits
+ * are an offset.  Far copies are split at segment boundaries and the
+ * pointer advanced by the compiler's own far arithmetic. */
+static uint32_t far_room(const uint8_t IMG_FAR *p, uint32_t n)
+{
+    uint32_t k = 65536UL - ((uint32_t)p & 0xFFFFu);
+
+    return n < k ? n : k;
+}
+
+void fmemset(uint8_t IMG_FAR *dst, int c, uint32_t n)
+{
+    while (n) {
+        uint32_t k = far_room(dst, n);
+
+        _fmemset(dst, c, (size_t)k);
+        dst += k;
+        n -= k;
+    }
+}
+
+void fmemcpy(uint8_t IMG_FAR *dst, const void *src, uint32_t n)
+{
+    const uint8_t *s = (const uint8_t *)src;
+
+    while (n) {
+        uint32_t k = far_room(dst, n);
+
+        _fmemcpy(dst, (const void __far *)s, (size_t)k);
+        dst += k;
+        s += k;
+        n -= k;
+    }
+}
+
+void fget_far(const buf_t *b, uint32_t off, uint8_t IMG_FAR *dst, uint32_t n)
+{
+    while (n) {
+        uint32_t a = b->lin + off;
+        uint16_t o = (uint16_t)(a & 0xF);
+        uint32_t k = 65536UL - o;
+
+        if (k > n)
+            k = n;
+        k = far_room(dst, k);
+        _fmemcpy(dst, dseg_fp((uint16_t)(a >> 4), o), (size_t)k);
+        dst += k;
+        off += k;
+        n -= k;
+    }
+}
+
+void fput_far(const buf_t *b, uint32_t off, const uint8_t IMG_FAR *src,
+              uint32_t n)
+{
+    while (n) {
+        uint32_t a = b->lin + off;
+        uint16_t o = (uint16_t)(a & 0xF);
+        uint32_t k = 65536UL - o;
+
+        if (k > n)
+            k = n;
+        k = far_room(src, k);
+        _fmemcpy(dseg_fp((uint16_t)(a >> 4), o), (const void __far *)src,
+                 (size_t)k);
+        src += k;
+        off += k;
+        n -= k;
+    }
+}
+
+void fmem_get(uint8_t *dst, const uint8_t IMG_FAR *src, uint32_t n)
+{
+    while (n) {
+        uint32_t k = far_room(src, n);
+
+        _fmemcpy(dst, (const void __far *)src, (size_t)k);
+        src += k;
+        dst += k;
+        n -= k;
+    }
+}
+
 /* Allocate a paragraph-aligned block; DOS memory is precious on real
  * hardware so the request is rounded up to paragraphs. */
 int mem_alloc(uint32_t n, buf_t *out)

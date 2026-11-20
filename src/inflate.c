@@ -95,15 +95,15 @@ static void inf_put(inf_t *s, uint8_t b)
         inf_stage_flush(s);
 }
 
-static int inf_copy(inf_t *s, int dist, int len)
+/* dist is a 32-bit value on purpose: a 16-bit int would turn the maximum
+ * deflate distance (32768) into a negative number. */
+static int inf_copy(inf_t *s, uint32_t dist, int len)
 {
-    int src;
+    uint32_t src;
 
-    if (dist <= 0 || (uint32_t)dist > s->total)
+    if (dist == 0 || dist > WSIZE || dist > s->total)
         return IMG_ERR_CORRUPT;
-    src = (int)s->wpos - dist;
-    if (src < 0)
-        src += WSIZE;
+    src = ((uint32_t)s->wpos + WSIZE - dist) & WMASK;
     while (len-- > 0) {
         uint8_t b = s->win[src];
         src = (src + 1) & WMASK;
@@ -130,22 +130,22 @@ static void huff_build(huff_t *h, const uint8_t *lengths, int n)
             h->symbol[offs[lengths[i]]++] = (uint16_t)i;
 }
 
+/* Canonical Huffman: code and first must be wider than 16 bits, because a
+ * 15-bit code plus its count reaches 2^16 and would wrap in a 16-bit int. */
 static int huff_decode(inf_t *s, const huff_t *h)
 {
-    int len, code = 0, first = 0, index = 0;
+    uint32_t len, code = 0, first = 0, index = 0;
 
     for (len = 1; len <= 15; len++) {
         int b = inf_bits(s, 1);
-        uint16_t cnt;
 
         if (b < 0)
             return -1;
-        code |= b;
-        cnt = h->count[len];
-        if (code - first < (int)cnt)
+        code |= (uint32_t)b;
+        if (code - first < h->count[len])
             return h->symbol[index + (code - first)];
-        index += cnt;
-        first = (first + cnt) << 1;
+        index += h->count[len];
+        first = (first + h->count[len]) << 1;
         code <<= 1;
     }
     return -1;
@@ -219,7 +219,8 @@ static int inf_codes(inf_t *s, const huff_t *lc, const huff_t *dc)
         } else if (sym == 256) {
             return IMG_OK;
         } else {
-            int len, dist, dsym, e;
+            int len, dsym, e;
+            uint32_t dist;
 
             sym -= 257;
             if (sym >= 29)
@@ -234,7 +235,7 @@ static int inf_codes(inf_t *s, const huff_t *lc, const huff_t *dc)
             e = inf_bits(s, dext[dsym]);
             if (e < 0)
                 return IMG_ERR_TRUNC;
-            dist = dbase[dsym] + e;
+            dist = (uint32_t)dbase[dsym] + (uint32_t)e;
             {
                 int r = inf_copy(s, dist, len);
                 if (r != IMG_OK)
@@ -246,11 +247,12 @@ static int inf_codes(inf_t *s, const huff_t *lc, const huff_t *dc)
 
 static int inf_dynamic(inf_t *s)
 {
+    /* Static, not stack: the DOS stack is small and every byte counts. */
+    static uint8_t clen[19];
+    static uint8_t lengths[286 + 30];
     static const uint8_t order[19] = {
         16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
     };
-    uint8_t clen[19];
-    uint8_t lengths[286 + 30];
     huff_t codecode;
     int hlit, hdist, hclen, i, n, v;
 

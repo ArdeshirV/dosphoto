@@ -1,0 +1,10 @@
+# dphoto native 8-bit image ("DPH1IMG"), see README.md for the layout.
+#
+# Test it with:   file -m contrib/dphoto.magic picture.img
+# Install it by appending these lines to /usr/share/misc/magic and then
+# running:        file -C -m /usr/share/misc/magic
+0	string	DPH1IMG		DPhoto DOS 256-colour image
+!:mime	image/x-dphoto
+>8	leshort	x		\b, %u x
+>10	leshort	x		%u
+>12	byte	8		\b, 8-bit palette index

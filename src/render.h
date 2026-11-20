@@ -21,6 +21,6 @@ void render_init(void);
 void render_palette(uint8_t *pal);      /* 768 bytes, RGB triplets */
 void render_begin(render_t *r, uint16_t sw, uint16_t sh,
                   uint16_t tw, uint16_t th, blit_fn blit, void *ctx);
-void render_row(void *ctx, const uint8_t *rgb, uint16_t y);
+void render_row(void *ctx, const uint8_t IMG_FAR *rgb, uint16_t y);
 
 #endif

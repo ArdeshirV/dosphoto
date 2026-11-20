@@ -43,13 +43,16 @@ typedef struct {
     uint32_t bits_read;
     int32_t  coef[64];
     int16_t  tab_r[256], tab_g1[256], tab_g2[256], tab_b[256];
-    uint16_t xmap[2][IMG_MAX_WIDTH];
+    uint16_t IMG_FAR *xmap[2];
     uint8_t  rowloaded[3];
     uint8_t  scan_idx[3];
 } jdec_t;
 
 static jdec_t g_jd;
-static uint8_t g_jrows[3][IMG_MAX_WIDTH + 64];
+/* Per-image scratch: the two chroma maps and the three band row buffers.
+ * Lives in far memory (allocated in jpg_decode) so wide photos fit. */
+static buf_t g_jscratch;
+static uint8_t IMG_FAR *g_jrows[3];
 
 static const uint8_t zigzag[64] = {
      0,  1,  8, 16,  9,  2,  3, 10,
@@ -115,7 +118,8 @@ static int jbits(jdec_t *d, int n)
 
 static int jhuff_decode(jdec_t *d, const jhuff_t *h)
 {
-    int len, code = 0;
+    uint32_t len;
+    int32_t code = 0;          /* a 16-bit int would wrap at 16-bit codes */
 
     for (len = 1; len <= 16; len++) {
         int b = jbits(d, 1);
@@ -689,11 +693,11 @@ static void build_tabs(jdec_t *d)
 
 static void emit_row(jdec_t *d)
 {
-    uint8_t *out = g_rgbrow;
+    uint8_t IMG_FAR *out = g_rgbrow;
     uint16_t w = d->width, x;
 
     if (d->ncomp == 1) {
-        const uint8_t *yp = g_jrows[0];
+        const uint8_t IMG_FAR *yp = g_jrows[0];
         for (x = 0; x < w; x++) {
             uint8_t g = yp[x];
             out[3 * x] = g; out[3 * x + 1] = g; out[3 * x + 2] = g;
@@ -701,11 +705,11 @@ static void emit_row(jdec_t *d)
         return;
     }
     {
-        const uint8_t *yp = g_jrows[0];
-        const uint8_t *cb = g_jrows[1];
-        const uint8_t *cr = g_jrows[2];
-        const uint16_t *mx1 = d->xmap[0];
-        const uint16_t *mx2 = d->xmap[1];
+        const uint8_t IMG_FAR *yp = g_jrows[0];
+        const uint8_t IMG_FAR *cb = g_jrows[1];
+        const uint8_t IMG_FAR *cr = g_jrows[2];
+        const uint16_t IMG_FAR *mx1 = d->xmap[0];
+        const uint16_t IMG_FAR *mx2 = d->xmap[1];
 
         for (x = 0; x < w; x++) {
             int y = yp[x];
@@ -769,6 +773,35 @@ int jpg_decode(const buf_t *f, img_row_fn cb, void *ctx)
         }
     }
 
+    /* Scratch: two chroma maps plus three band rows, in far memory. */
+    {
+        uint16_t pwmax = d->comp[0].pw;
+        uint32_t rows_at, need;
+
+        for (i = 1; i < d->ncomp; i++)
+            if (d->comp[i].pw > pwmax)
+                pwmax = d->comp[i].pw;
+        rows_at = (uint32_t)d->width * 4u;   /* both maps, always */
+        need = rows_at + 3u * ((uint32_t)pwmax + 64u);
+        if (g_jscratch.len < need) {
+            mem_free(&g_jscratch);
+            if (mem_alloc(need, &g_jscratch) != IMG_OK) {
+                int j;
+                for (j = 0; j < d->ncomp; j++)
+                    mem_free(&d->comp[j].plane);
+                return IMG_ERR_NOMEM;
+            }
+        }
+        {
+            uint8_t IMG_FAR *p = buf_fp(&g_jscratch);
+            d->xmap[0] = (uint16_t IMG_FAR *)p;
+            d->xmap[1] = d->xmap[0] + d->width;
+            p += rows_at;
+            for (i = 0; i < 3; i++)
+                g_jrows[i] = p + (uint32_t)i * ((uint32_t)pwmax + 64u);
+        }
+    }
+
     for (ci = 1; ci < d->ncomp; ci++) {
         uint16_t x;
         for (x = 0; x < d->width; x++)
@@ -829,9 +862,9 @@ int jpg_decode(const buf_t *f, img_row_fn cb, void *ctx)
             for (ci = 0; ci < d->ncomp; ci++) {
                 uint8_t crow = (uint8_t)((ry * d->comp[ci].vs) / d->vmax);
                 if (d->rowloaded[ci] != crow) {
-                    fget_n(&d->comp[ci].plane,
-                           (uint32_t)crow * d->comp[ci].pw,
-                           g_jrows[ci], d->comp[ci].pw);
+                    fget_far(&d->comp[ci].plane,
+                             (uint32_t)crow * d->comp[ci].pw,
+                             g_jrows[ci], d->comp[ci].pw);
                     d->rowloaded[ci] = crow;
                 }
             }

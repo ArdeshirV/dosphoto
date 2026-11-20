@@ -165,18 +165,17 @@ void vid_done(void)
     int86(0x10, &r, &r);
 }
 
+/* Program the DAC directly: BIOS function 1012h takes 6-bit components but
+ * implementations disagree about what they do with 8-bit input (some mask,
+ * some scale), which produced wrong mid-tones.  Writing the VGA registers
+ * with true 6-bit values is unambiguous. */
 void vid_setpal(const uint8_t *rgb)
 {
-    union REGS r;
-    struct SREGS sr;
+    uint16_t i;
 
-    segread(&sr);
-    sr.es = sr.ds;                       /* the table lives in DGROUP */
-    r.w.ax = 0x1012;
-    r.w.bx = 0;
-    r.w.cx = 256;
-    r.x.dx = (uint16_t)(uintptr_t)rgb;
-    int86x(0x10, &r, &r, &sr);
+    outp(0x3C8, 0);
+    for (i = 0; i < 768; i++)
+        outp(0x3C9, (uint8_t)(rgb[i] >> 2));
 }
 
 /* Read one DAC entry straight from the VGA registers (the BIOS 1015h call is

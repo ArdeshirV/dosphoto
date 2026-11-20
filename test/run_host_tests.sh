@@ -49,6 +49,15 @@ ff -i "$work/tiny.ppm" -pix_fmt rgb24 "$work/tiny.png"
 ff -i "$work/tiny.ppm" "$work/tiny.jpg"
 ff -i "$work/tiny.ppm" -pix_fmt bgr24 "$work/tiny.bmp"
 
+# a photo-sized PNG: 1600 px wide is well past the old 1024 limit, and the
+# scanline is longer than the old 4K static row buffer
+ff -f lavfi -i "testsrc2=size=1600x400:duration=1" -frames:v 1 \
+    -pix_fmt rgb24 "$work/wide.png"
+
+# native image format (dphoto's own .img)
+python3 "$top/test/gen_img.py" "$work/native.img" "$work/native-ref.ppm"
+python3 "$top/test/gen_img.py" "$work/nat6.img" "$work/nat6-ref.ppm" 6bit
+
 # --- run ------------------------------------------------------------------
 pass=0
 fail=0
@@ -65,6 +74,17 @@ for f in "$work"/*.png "$work"/*.jpg "$work"/*.bmp; do
         PASS) pass=$((pass + 1)) ;;
         *) fail=$((fail + 1)) ;;
     esac
+done
+
+for img in native nat6; do
+    if "$top/build/hosttest" dec "$work/$img.img" "$work/out.ppm" >/dev/null 2>&1; then
+        res=$(python3 "$top/test/compare.py" "$work/out.ppm" \
+              "$work/$img-ref.ppm" 0.0 2>&1 | tail -1)
+    else
+        res="DECODE FAILED"
+    fi
+    printf '%-16s %s\n' "$img.img" "$res"
+    case $res in PASS) pass=$((pass + 1)) ;; *) fail=$((fail + 1)) ;; esac
 done
 
 echo "--------------------------------------"
